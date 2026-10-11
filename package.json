@@ -1,0 +1,30 @@
+{
+  "name": "rachi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Job application tracker that reads your Gmail and keeps itself current",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "auth": "tsx --env-file-if-exists=.env src/gmail/auth-cli.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.0.0",
+    "fastify": "^5.0.0",
+    "googleapis": "^150.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

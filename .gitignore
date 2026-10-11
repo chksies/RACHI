@@ -9,15 +9,14 @@ token.json
 # Dependencies / build
 node_modules/
 dist/
-build/
-__pycache__/
-*.pyc
-.venv/
-venv/
 
 # Data / logs
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.log
-pgdata/
 
 # OS / editor
 .DS_Store
