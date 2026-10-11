@@ -1,3 +1,4 @@
+import { google } from "googleapis";
 import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createOAuthClient, SCOPES, tokenPath } from "./auth.js";
@@ -26,9 +27,21 @@ const server = createServer(async (req, res) => {
   }
   try {
     const { tokens } = await client.getToken(code);
+    client.setCredentials(tokens);
+
+    // Refuse to store tokens for any mailbox other than the configured one.
+    const expected = process.env.GMAIL_ACCOUNT?.trim().toLowerCase();
+    const profile = await google.gmail({ version: "v1", auth: client }).users.getProfile({ userId: "me" });
+    const actual = profile.data.emailAddress?.toLowerCase();
+    if (expected && actual !== expected) {
+      res.writeHead(403).end("Wrong Google account. Sign in as the account set in GMAIL_ACCOUNT.");
+      console.error(`Signed in as ${actual}, expected ${expected}. Tokens not saved.`);
+      return;
+    }
+
     writeFileSync(tokenPath(), JSON.stringify(tokens, null, 2));
     res.end("RACHI is connected. You can close this tab.");
-    console.log(`Saved tokens to ${tokenPath()}`);
+    console.log(`Saved tokens for ${actual} to ${tokenPath()}`);
   } catch (err) {
     res.writeHead(500).end("Token exchange failed");
     console.error(err);
