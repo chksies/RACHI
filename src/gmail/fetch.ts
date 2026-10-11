@@ -47,31 +47,50 @@ export function toRawEmail(msg: gmail_v1.Schema$Message): RawEmail {
   };
 }
 
-/** users.messages.list for IDs, then users.messages.get for each full message. */
-export async function fetchRecent(auth: OAuth2Client, newerThanDays: number): Promise<RawEmail[]> {
+// Narrow the mailbox to likely job mail so we spend quota on relevant messages only.
+const ATS_SENDERS = ["lever.co", "ashbyhq.com", "myworkday.com", "greenhouse.io", "greenhouse-mail.io", "icims.com", "smartrecruiters.com", "workable.com"];
+const JOB_TERMS = ["application", "applying", "applied", "interview", "candidacy", "candidate", "recruiter", "assessment", "your candidacy"];
+
+export function jobQuery(newerThanDays: number): string {
+  const from = ATS_SENDERS.map((d) => `from:${d}`).join(" OR ");
+  const terms = JOB_TERMS.map((t) => (t.includes(" ") ? `"${t}"` : `subject:${t}`)).join(" OR ");
+  return `newer_than:${newerThanDays}d (${from} OR ${terms}) -category:promotions -category:social`;
+}
+
+/** users.messages.list: IDs only, which is cheap. Full messages are fetched one at a time later. */
+export async function listJobMessageIds(auth: OAuth2Client, newerThanDays: number): Promise<string[]> {
   const gmail = google.gmail({ version: "v1", auth });
   const ids: string[] = [];
   let pageToken: string | undefined;
   do {
-    const res = await gmail.users.messages.list({
-      userId: "me",
-      q: `newer_than:${newerThanDays}d`,
-      maxResults: 100,
-      pageToken,
-    });
+    const res = await withBackoff(() =>
+      gmail.users.messages.list({ userId: "me", q: jobQuery(newerThanDays), maxResults: 100, pageToken }),
+    );
     res.data.messages?.forEach((m) => m.id && ids.push(m.id));
     pageToken = res.data.nextPageToken ?? undefined;
   } while (pageToken);
-
-  return ids.length ? fetchByIds(auth, ids) : [];
+  return ids;
 }
 
-export async function fetchByIds(auth: OAuth2Client, ids: string[]): Promise<RawEmail[]> {
+export async function fetchEmail(auth: OAuth2Client, id: string): Promise<RawEmail> {
   const gmail = google.gmail({ version: "v1", auth });
-  const emails: RawEmail[] = [];
-  for (const id of ids) {
-    const res = await gmail.users.messages.get({ userId: "me", id, format: "full" });
-    emails.push(toRawEmail(res.data));
+  const res = await withBackoff(() => gmail.users.messages.get({ userId: "me", id, format: "full" }));
+  return toRawEmail(res.data);
+}
+
+function isRateLimit(err: unknown): boolean {
+  const e = err as { code?: number; message?: string };
+  return e?.code === 429 || /quota|rate limit/i.test(e?.message ?? "");
+}
+
+/** Retry with exponential backoff when Gmail throttles us (per-minute quota). */
+async function withBackoff<T>(fn: () => Promise<T>, attempts = 6): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isRateLimit(err) || i >= attempts - 1) throw err;
+      await new Promise((r) => setTimeout(r, Math.min(60_000, 2_000 * 2 ** i)));
+    }
   }
-  return emails;
 }

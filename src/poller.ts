@@ -1,6 +1,6 @@
 import type { createOAuthClient } from "./gmail/auth.js";
 import type { Db } from "./db.js";
-import { fetchRecent } from "./gmail/fetch.js";
+import { fetchEmail, listJobMessageIds } from "./gmail/fetch.js";
 import { processEmail, type Outcome } from "./pipeline.js";
 
 type OAuth2Client = ReturnType<typeof createOAuthClient>;
@@ -16,9 +16,19 @@ export async function pollOnce(db: Db, auth: OAuth2Client): Promise<PollSummary>
   const last = db.prepare("SELECT value FROM sync_state WHERE key = 'last_poll'").get() as { value: string } | undefined;
   const days = last ? Math.max(1, Math.ceil((Date.now() - Date.parse(last.value)) / 86_400_000) + 1) : 30;
 
-  const emails = await fetchRecent(auth, days);
   const summary: PollSummary = { skipped: 0, noise: 0, created: 0, updated: 0, queued: 0 };
-  for (const email of emails) summary[processEmail(db, email)]++;
+  const isSeen = db.prepare("SELECT 1 FROM processed_messages WHERE gmail_message_id = ?");
+
+  // Skip already-handled IDs before downloading anything, and process each message as it
+  // arrives so a mid-run failure keeps the progress made so far.
+  for (const id of await listJobMessageIds(auth, days)) {
+    if (isSeen.get(id)) {
+      summary.skipped++;
+      continue;
+    }
+    summary[processEmail(db, await fetchEmail(auth, id))]++;
+    await new Promise((r) => setTimeout(r, 150));
+  }
 
   db.prepare("INSERT OR REPLACE INTO sync_state (key, value) VALUES ('last_poll', ?)").run(new Date().toISOString());
   return summary;

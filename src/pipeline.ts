@@ -33,7 +33,7 @@ export function processEmail(db: Db, email: RawEmail): Outcome {
 
   const date = email.date.toISOString().slice(0, 10);
   const status: ApplicationStatus = KIND_TO_STATUS[kind] ?? "applied";
-  const parsed = parseEmail(email);
+  const parsed = parseEmail(email, kind);
 
   const run = db.transaction((): Outcome => {
     const existing = parsed
@@ -58,12 +58,14 @@ export function processEmail(db: Db, email: RawEmail): Outcome {
       return "updated";
     }
 
-    // Only confirmations create rows. A rejection for a company we never saw goes to review.
-    if (parsed && kind === "confirmation") {
+    // A rejection or interview for a company we never saw means we missed the confirmation
+    // (it predates the lookback window, or was sent from another address). Still log it.
+    if (parsed && (kind === "confirmation" || kind === "rejection" || kind === "interview")) {
+      const applied = kind === "confirmation" ? date : null;
       db.prepare(
         `INSERT INTO applications (company, company_key, role, location, date_applied, status, source, gmail_message_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(parsed.company, companyKey(parsed.company), parsed.role, parsed.location, date, status, parsed.source, email.id);
+      ).run(parsed.company, companyKey(parsed.company), parsed.role, parsed.location, applied, status, parsed.source, email.id);
       markProcessed(db, email.id, kind);
       return "created";
     }

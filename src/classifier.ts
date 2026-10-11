@@ -38,6 +38,11 @@ export function classify(email: Pick<RawEmail, "from" | "subject" | "body">): Cl
   const subject = email.subject.toLowerCase();
   const body = email.body.toLowerCase();
 
+  // Account chores sent through the same ATS are not application events.
+  if (/security code|verification code|verify your email|reset your password/.test(subject)) {
+    return { kind: "noise", score: 0 };
+  }
+
   let best: Classification = { kind: "noise", score: 0 };
   for (const [kind, phrases] of Object.entries(SIGNALS) as [Exclude<EmailKind, "noise">, string[]][]) {
     let score = 0;
