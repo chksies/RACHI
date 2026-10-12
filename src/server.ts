@@ -1,13 +1,17 @@
 import Fastify from "fastify";
 import type { Db } from "./db.js";
 import { findExisting } from "./dedup.js";
-import type { Application } from "./types.js";
+import { senderCompany } from "./parsers/index.js";
+import { resolveReview } from "./pipeline.js";
+import type { Application, ApplicationStatus } from "./types.js";
+
+const REVIEW_STATUSES: ApplicationStatus[] = ["applied", "interviewing", "rejected"];
 
 const esc = (s: unknown) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
 const STYLE = `<style>
-  body{font:15px system-ui,sans-serif;margin:2rem auto;max-width:960px;padding:0 1rem;color:#1a1a1a;background:#fff}
+  body{font:15px system-ui,sans-serif;margin:2rem auto;max-width:1200px;padding:0 1rem;color:#1a1a1a;background:#fff}
   .stats{display:flex;gap:1rem;flex-wrap:wrap;margin:1rem 0}
   .stat{border:1px solid #ddd;border-radius:8px;padding:.5rem 1rem;color:inherit;text-decoration:none}
   a.stat:hover{background:#f5f5f5}
@@ -15,6 +19,11 @@ const STYLE = `<style>
   input{padding:.4rem;width:100%;max-width:320px;margin-bottom:.5rem}
   button{cursor:pointer}
   .muted{color:#666}
+  .scroll{overflow-x:auto}
+  td input{margin:0;min-width:7rem}
+  .acts{min-width:11rem}
+  .acts button{margin:0 .25rem .25rem 0;padding:.25rem .6rem}
+  .quiet{opacity:.6}
   @media (prefers-color-scheme: dark){body{background:#111;color:#eee}.stat{border-color:#333}a.stat:hover{background:#1c1c1c}td,th{border-color:#262626}.muted{color:#999}a{color:#8ab4f8}}
 </style>`;
 
@@ -81,26 +90,56 @@ ${rows.map((r) => `<tr><td>${esc(r.company)}</td><td>${esc(r.role)}</td><td>${es
     const html = page("RACHI: needs review", `
 <p><a href="/">&larr; Dashboard</a></p>
 <h1>Needs review</h1>
-<p class="muted">Job-related emails RACHI could not match to a company. Open one in Gmail to see it, then dismiss it once handled.</p>
+<p class="muted">Job-related emails RACHI could not match to a company. Check the company, then file each one as Applied, Interviewing or Rejected. It joins the matching application if one exists.</p>
 <div class="stats"><div class="stat"><b id="count">${rows.length}</b> to review</div></div>
 <input id="q" placeholder="Search sender or subject" oninput="for(const r of document.querySelectorAll('tbody tr'))r.hidden=!r.textContent.toLowerCase().includes(this.value.toLowerCase())">
-<table><thead><tr><th>Received</th><th>From</th><th>Subject</th><th>Type</th><th></th></tr></thead><tbody>
+<div class="scroll"><table><thead><tr><th>Received</th><th>Email</th><th>Company and role</th><th>File as</th></tr></thead><tbody>
 ${rows
-  .map(
-    (r) => `<tr id="r-${esc(r.gmail_message_id)}"><td class="muted">${esc((r.received_at ?? "").slice(0, 10))}</td><td>${esc(r.sender)}</td><td><a href="${esc(gmailLink(r.gmail_message_id))}" target="_blank" rel="noopener">${esc(r.subject)}</a></td><td>${esc(r.kind)}</td><td><button onclick="dismiss('${esc(r.gmail_message_id)}')">Dismiss</button></td></tr>`,
-  )
+  .map((r) => {
+    const id = esc(r.gmail_message_id);
+    return `<tr id="r-${id}"><td class="muted">${esc((r.received_at ?? "").slice(0, 10))}</td>
+<td><a href="${esc(gmailLink(r.gmail_message_id))}" target="_blank" rel="noopener">${esc(r.subject)}</a><div class="muted">${esc(r.sender)} &middot; ${esc(r.kind)}</div></td>
+<td><input class="co" placeholder="Company" value="${esc(senderCompany(r.sender ?? ""))}"><input class="ro" placeholder="Role (optional)" style="margin-top:.35rem"></td>
+<td class="acts"><button onclick="file('${id}','applied')">Applied</button> <button onclick="file('${id}','interviewing')">Interviewing</button> <button onclick="file('${id}','rejected')">Rejected</button> <button class="quiet" onclick="dismiss('${id}')">Dismiss</button></td></tr>`;
+  })
   .join("")}
-</tbody></table>
+</tbody></table></div>
 <script>
+function done(id){
+  document.getElementById("r-" + id).remove();
+  const c = document.getElementById("count"); c.textContent = Number(c.textContent) - 1;
+}
+async function file(id, status){
+  const row = document.getElementById("r-" + id);
+  const company = row.querySelector(".co").value.trim();
+  if (!company) { row.querySelector(".co").focus(); return alert("Enter the company first"); }
+  const res = await fetch("/review/" + encodeURIComponent(id) + "/apply", {
+    method: "POST", headers: {"content-type": "application/json"},
+    body: JSON.stringify({company, role: row.querySelector(".ro").value.trim(), status})
+  });
+  if (!res.ok) return alert("Could not save that one");
+  done(id);
+}
 async function dismiss(id){
   const res = await fetch("/review/" + encodeURIComponent(id) + "/resolve", {method: "POST"});
   if (!res.ok) return alert("Could not dismiss that email");
-  document.getElementById("r-" + id).remove();
-  const c = document.getElementById("count"); c.textContent = Number(c.textContent) - 1;
+  done(id);
 }
 </script>`);
     return reply.type("text/html").send(html);
   });
+
+  // File a queued email as an application with the status the user picked.
+  app.post<{ Params: { id: string }; Body: { company?: string; role?: string; status?: string } }>(
+    "/review/:id/apply",
+    async (req, reply) => {
+      const { company, role, status } = req.body ?? {};
+      if (!company?.trim()) return reply.code(400).send({ error: "company is required" });
+      if (!REVIEW_STATUSES.includes(status as ApplicationStatus)) return reply.code(400).send({ error: "invalid status" });
+      const outcome = resolveReview(db, req.params.id, { company, role, status: status as ApplicationStatus });
+      return outcome === "not_found" ? reply.code(404).send({ error: "not found" }) : { ok: true, outcome };
+    },
+  );
 
   app.post<{ Params: { id: string } }>("/review/:id/resolve", async (req, reply) => {
     const { changes } = db.prepare("UPDATE review_queue SET resolved = 1 WHERE gmail_message_id = ?").run(req.params.id);

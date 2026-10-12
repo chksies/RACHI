@@ -80,3 +80,48 @@ export function processEmail(db: Db, email: RawEmail): Outcome {
 
   return run();
 }
+
+export interface ReviewDecision {
+  company: string;
+  role?: string | null;
+  status: ApplicationStatus;
+}
+
+/**
+ * The user decided what a queued email is. Attach it to an existing application (same
+ * dedup rules as the poller) or create one, set the chosen status, and close the item.
+ * An explicit choice overrides the automatic status ordering.
+ */
+export function resolveReview(db: Db, id: string, decision: ReviewDecision): "created" | "updated" | "not_found" {
+  const item = db
+    .prepare("SELECT sender, subject, received_at FROM review_queue WHERE gmail_message_id = ? AND resolved = 0")
+    .get(id) as { sender: string | null; subject: string | null; received_at: string | null } | undefined;
+  if (!item) return "not_found";
+
+  const company = decision.company.trim();
+  const role = decision.role?.trim() || null;
+  const today = new Date().toISOString().slice(0, 10);
+
+  return db.transaction((): "created" | "updated" => {
+    const existing = findExisting(db, company, role);
+    let outcome: "created" | "updated";
+    if (existing) {
+      db.prepare("UPDATE applications SET status = ?, role = COALESCE(role, ?), notes = ? WHERE id = ?").run(
+        decision.status,
+        role,
+        appendNote(existing.notes, `${today} manual ${decision.status}: ${item.subject ?? ""}`),
+        existing.id,
+      );
+      outcome = "updated";
+    } else {
+      const applied = decision.status === "applied" ? (item.received_at ?? "").slice(0, 10) || today : null;
+      db.prepare(
+        `INSERT INTO applications (company, company_key, role, location, date_applied, status, source, gmail_message_id)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
+      ).run(company, companyKey(company), role, applied, decision.status, "review", id);
+      outcome = "created";
+    }
+    db.prepare("UPDATE review_queue SET resolved = 1 WHERE gmail_message_id = ?").run(id);
+    return outcome;
+  })();
+}

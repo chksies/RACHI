@@ -3,7 +3,7 @@ import { classify } from "./classifier.js";
 import { companyKey } from "./dedup.js";
 import { openDb } from "./db.js";
 import { parseEmail } from "./parsers/index.js";
-import { processEmail } from "./pipeline.js";
+import { processEmail, resolveReview } from "./pipeline.js";
 import type { RawEmail } from "./types.js";
 
 const mail = (over: Partial<RawEmail>): RawEmail => ({
@@ -105,5 +105,38 @@ describe("dedup + pipeline", () => {
     processEmail(db, mail({ from: "Stripe <a@greenhouse.io>", subject: "Stripe update", body: "Unfortunately we are not moving forward" }));
     processEmail(db, mail({ from: "Stripe <x@ashbyhq.com>", subject: "Application Received — Engineer at Stripe", body: "thank you for applying" }));
     expect(db.prepare("SELECT status FROM applications").all()).toEqual([{ status: "rejected" }]);
+  });
+});
+
+describe("resolveReview", () => {
+  const queue = (db: ReturnType<typeof openDb>) => {
+    const m = mail({ from: "Human Resources <do_not_reply@clearcompany.com>", subject: "Application Received", body: "We have received your application" });
+    expect(processEmail(db, m)).toBe("queued");
+    return m.id;
+  };
+
+  it("files a queued email as a new applied application", () => {
+    const db = openDb(":memory:");
+    const id = queue(db);
+    expect(resolveReview(db, id, { company: "Acme Corp", role: "Analyst", status: "applied" })).toBe("created");
+    expect(db.prepare("SELECT company, role, status, date_applied FROM applications").all()).toEqual([
+      { company: "Acme Corp", role: "Analyst", status: "applied", date_applied: "2026-10-03" },
+    ]);
+    expect(db.prepare("SELECT resolved FROM review_queue").get()).toEqual({ resolved: 1 });
+  });
+
+  it("moves an existing application to the chosen status instead of duplicating", () => {
+    const db = openDb(":memory:");
+    processEmail(db, mail({ from: "Acme <x@ashbyhq.com>", subject: "Application Received — Analyst at Acme", body: "thank you for applying" }));
+    const id = queue(db);
+    expect(resolveReview(db, id, { company: "acme", status: "interviewing" })).toBe("updated");
+    expect(db.prepare("SELECT status FROM applications").all()).toEqual([{ status: "interviewing" }]);
+  });
+
+  it("cannot be resolved twice", () => {
+    const db = openDb(":memory:");
+    const id = queue(db);
+    resolveReview(db, id, { company: "Acme", status: "rejected" });
+    expect(resolveReview(db, id, { company: "Acme", status: "rejected" })).toBe("not_found");
   });
 });
