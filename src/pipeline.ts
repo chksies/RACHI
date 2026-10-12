@@ -1,7 +1,7 @@
 import { classify } from "./classifier.js";
 import type { Db } from "./db.js";
 import { companyKey, findByText, findExisting, nextStatus } from "./dedup.js";
-import { parseEmail } from "./parsers/index.js";
+import { parseEmail, senderCompany, splitSender } from "./parsers/index.js";
 import type { ApplicationStatus, EmailKind, RawEmail } from "./types.js";
 
 export type Outcome = "skipped" | "noise" | "created" | "updated" | "queued";
@@ -82,7 +82,7 @@ export function processEmail(db: Db, email: RawEmail): Outcome {
 }
 
 export interface ReviewDecision {
-  company: string;
+  company?: string;
   role?: string | null;
   status: ApplicationStatus;
 }
@@ -98,7 +98,7 @@ export function resolveReview(db: Db, id: string, decision: ReviewDecision): "cr
     .get(id) as { sender: string | null; subject: string | null; received_at: string | null } | undefined;
   if (!item) return "not_found";
 
-  const company = decision.company.trim();
+  const company = decision.company?.trim() || guessCompany(db, item.sender ?? "", item.subject ?? "");
   const role = decision.role?.trim() || null;
   const today = new Date().toISOString().slice(0, 10);
 
@@ -124,4 +124,31 @@ export function resolveReview(db: Db, id: string, decision: ReviewDecision): "cr
     db.prepare("UPDATE review_queue SET resolved = 1 WHERE gmail_message_id = ?").run(id);
     return outcome;
   })();
+}
+
+// Mail hosts and ATS domains say nothing about who the employer is.
+const NON_EMPLOYER_DOMAINS =
+  /^(gmail|googlemail|outlook|hotmail|yahoo|lever|ashbyhq|myworkday|workday|greenhouse|greenhouse-mail|icims|dayforce|ceridian|clearcompany|adp|workable|smartrecruiters|taleo|oraclecloud|successfactors|bamboohr|jobvite|hibob|breezy|recruitee|jazzhr|teamtailor|ultipro)$/;
+
+/** Employer name from the sender's domain: careers@talent.autodesk.com -> "Autodesk". */
+function domainCompany(from: string): string | null {
+  const labels = splitSender(from).domain.split(".");
+  const label = labels.length >= 2 ? labels[labels.length - 2]! : "";
+  if (!label || NON_EMPLOYER_DOMAINS.test(label)) return null;
+  return label[0]!.toUpperCase() + label.slice(1);
+}
+
+/**
+ * Best-effort company for a queued email when the user doesn't type one: a company we
+ * already track that appears in the email, then the sender's name, then a subject
+ * pattern, then the sender's domain.
+ */
+export function guessCompany(db: Db, sender: string, subject: string): string {
+  const known = findByText(db, `${sender} ${subject}`);
+  if (known) return known.company;
+  const named = senderCompany(sender);
+  if (named) return named;
+  const parsed = parseEmail({ id: "", from: sender, subject, body: "", date: new Date() }, "confirmation");
+  if (parsed) return parsed.company;
+  return domainCompany(sender) ?? "Unknown";
 }

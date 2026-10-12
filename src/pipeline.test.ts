@@ -140,3 +140,36 @@ describe("resolveReview", () => {
     expect(resolveReview(db, id, { company: "Acme", status: "rejected" })).toBe("not_found");
   });
 });
+
+describe("resolveReview without a typed company", () => {
+  const queueMail = (db: ReturnType<typeof openDb>, from: string, subject: string) => {
+    const m = mail({ from, subject, body: "We have received your application" });
+    expect(processEmail(db, m)).toBe("queued");
+    return m.id;
+  };
+  const company = (db: ReturnType<typeof openDb>) => (db.prepare("SELECT company FROM applications").get() as { company: string }).company;
+
+  it("uses a company we already track when it appears in the email", () => {
+    const db = openDb(":memory:");
+    processEmail(db, mail({ from: "Veeva Systems <x@ashbyhq.com>", subject: "Application Received — Analyst at Veeva Systems", body: "thank you for applying" }));
+    db.prepare("INSERT INTO review_queue (gmail_message_id, sender, subject, kind, received_at) VALUES (?, ?, ?, ?, ?)").run(
+      "q1", "Veeva Systems <no-reply@hire.lever.co>", "Update on Your Application at Veeva", "status", "2026-10-08T00:00:00Z",
+    );
+    expect(resolveReview(db, "q1", { status: "rejected" })).toBe("updated");
+    expect(db.prepare("SELECT status FROM applications").all()).toEqual([{ status: "rejected" }]);
+  });
+
+  it("falls back to the sender's domain", () => {
+    const db = openDb(":memory:");
+    const id = queueMail(db, "careers@talent.autodesk.com", "Chukwuemeka, we have received your application");
+    resolveReview(db, id, { status: "applied" });
+    expect(company(db)).toBe("Autodesk");
+  });
+
+  it("never invents an employer from an ATS domain", () => {
+    const db = openDb(":memory:");
+    const id = queueMail(db, "notify@dayforce.com", "Customer Service Specialist Application Confirmation");
+    resolveReview(db, id, { status: "applied" });
+    expect(company(db)).toBe("Unknown");
+  });
+});
