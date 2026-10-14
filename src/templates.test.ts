@@ -66,6 +66,20 @@ describe("templates built from real inbox mail", () => {
     expect(p?.company).toBe("Generalmotors");
   });
 
+  it("a person writing from the company's domain names the company, not themselves", () => {
+    const p = parseEmail(mail({ from: "Margarita Sandomirskaia <margarita@mastra.ai>", subject: "Your application", body: "We have decided not to move forward." }));
+    expect(p?.company).toBe("Mastra");
+    // A multi-word company sender is not mistaken for a person.
+    expect(parseEmail(mail({ from: "Texas Instruments Recruiting <recruiting@ti.com>", subject: "Your recent job application" }))?.company).toBe("Texas Instruments");
+  });
+
+  it("cleans multi-part and dangling sender names", () => {
+    const pipe = parseEmail(mail({ from: "MaintainX! | Merci d'avoir postulé <no-reply@maintainx.com>", subject: "Application Received" }));
+    expect(pipe?.company).toBe("MaintainX");
+    const amp = parseEmail(mail({ from: "Spare People & Talent Team <no-reply@ashbyhq.com>", subject: "Application Received" }));
+    expect(amp?.company).toBe("Spare People");
+  });
+
   it("falls back to the sender's own domain, but never an ATS domain", () => {
     expect(parseEmail(mail({ from: "careers@talent.autodesk.com", subject: "we have received your application" }))?.company).toBe("Autodesk");
     expect(parseEmail(mail({ from: "notify@dayforce.com", subject: "Application Confirmation" }))).toBeNull();

@@ -44,21 +44,77 @@ export async function sweepIfDue(db: Db, auth: OAuth2Client, everyHours: number)
   return summary;
 }
 
+/** What the dashboard shows in its sync indicator. Timestamps are ISO strings. */
+export interface PollStatus {
+  enabled: boolean;
+  running: boolean;
+  intervalMinutes: number;
+  lastPollAt: string | null;
+  nextPollAt: string | null;
+  /** Changes whenever a poll or sweep actually added or moved something, so the page can offer a refresh. */
+  lastChangeAt: string | null;
+  lastError: string | null;
+}
+
+export const pollStatus: PollStatus = {
+  enabled: false,
+  running: false,
+  intervalMinutes: 15,
+  lastPollAt: null,
+  nextPollAt: null,
+  lastChangeAt: null,
+  lastError: null,
+};
+
+let runNow: (() => boolean) | null = null;
+
+/** Start a check right now ("Check now" button). False when sync is off or a check is already running. */
+export function triggerPoll(): boolean {
+  return runNow ? runNow() : false;
+}
+
+/**
+ * Poll, then schedule the next poll for `intervalMinutes` after this one *finishes*. Chaining
+ * timeouts (instead of a fixed interval) means cycles never overlap and the countdown shown on
+ * the dashboard is exact.
+ */
 export function startPolling(db: Db, auth: OAuth2Client, intervalMinutes: number, log: (msg: string) => void) {
-  let running = false;
+  const stored = db.prepare("SELECT value FROM sync_state WHERE key = 'last_poll'").get() as { value: string } | undefined;
+  Object.assign(pollStatus, { enabled: true, intervalMinutes, lastPollAt: stored?.value ?? null });
+
+  let timer: NodeJS.Timeout | undefined;
+
   const tick = async () => {
-    if (running) return; // never overlap cycles
-    running = true;
+    clearTimeout(timer);
+    pollStatus.running = true;
     try {
-      log(`poll: ${JSON.stringify(await pollOnce(db, auth))}`);
+      const summary = await pollOnce(db, auth);
+      log(`poll: ${JSON.stringify(summary)}`);
+      let changed = summary.created + summary.updated + summary.queued > 0;
       const sweep = await sweepIfDue(db, auth, Number(process.env.SWEEP_INTERVAL_HOURS ?? 6));
-      if (sweep) log(`sweep: ${JSON.stringify(sweep)}`);
+      if (sweep) {
+        log(`sweep: ${JSON.stringify(sweep)}`);
+        changed ||= sweep.updated + sweep.queued > 0;
+      }
+      pollStatus.lastPollAt = new Date().toISOString();
+      pollStatus.lastError = null;
+      if (changed) pollStatus.lastChangeAt = pollStatus.lastPollAt;
     } catch (err) {
-      log(`poll failed: ${err instanceof Error ? err.message : String(err)}`);
+      pollStatus.lastError = err instanceof Error ? err.message : String(err);
+      log(`poll failed: ${pollStatus.lastError}`);
     } finally {
-      running = false;
+      pollStatus.running = false;
+      pollStatus.nextPollAt = new Date(Date.now() + intervalMinutes * 60_000).toISOString();
+      timer = setTimeout(() => void tick(), intervalMinutes * 60_000);
     }
   };
+
+  runNow = () => {
+    if (pollStatus.running) return false;
+    void tick();
+    return true;
+  };
+
   void tick();
-  return setInterval(tick, intervalMinutes * 60_000);
+  return () => clearTimeout(timer);
 }

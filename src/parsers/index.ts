@@ -15,6 +15,7 @@ export function splitSender(from: string): { name: string; local: string; domain
 /** Strip boilerplate from sender display names and subject fragments: "Stripe Recruiting Team" -> "Stripe". */
 export function cleanCompany(raw: string): string {
   return raw
+    .split(/\s\|\s/)[0]! // "MaintainX! | Merci d'avoir postulé" -> "MaintainX!"
     .replace(/\(.*?\)/g, " ")
     .replace(/@\s*\w+/g, " ")
     .replace(/['’]s\s+(hiring|recruiting)\s+team/gi, " ")
@@ -24,14 +25,34 @@ export function cleanCompany(raw: string): string {
       " ",
     )
     .replace(/["“”]/g, "")
+    .replace(/(?:\s+&|\s+and)\s*$/i, "") // "Spare People &" left over after "Culture Team" is stripped
     .replace(/[\s\-–—,.:!|]+$/g, "")
     .replace(/^[\s\-–—,.:!|]+/g, "")
     .replace(/\s{2,}/g, " ")
     .trim();
 }
 
-/** Company from the sender's display name. Null for generic senders like "Human Resources". */
+/**
+ * "Margarita Sandomirskaia <margarita@mastra.ai>" is a person, not a company: two or three
+ * name-like words, one of which is in the address, sent from a real company domain we can
+ * name instead. "Texas Instruments <recruiting@ti.com>" is not (no name word in the address).
+ */
+function looksLikePerson(from: string): boolean {
+  const { name, local } = splitSender(from);
+  const words = cleanCompany(name).split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 3 || !domainCompany(from)) return false;
+  // "VC3 Inc" or "Acme Corp" are companies, however they are addressed.
+  if (words.some((w) => /^(inc|llc|ltd|limited|corp|corporation|co|gmbh|plc|group|systems|technologies)\.?$/i.test(w))) return false;
+  const address = local.toLowerCase().replace(/[^a-z]/g, "");
+  return words.some((w) => {
+    const letters = w.toLowerCase().replace(/[^a-z]/g, "");
+    return letters.length >= 3 && address.includes(letters);
+  });
+}
+
+/** Company from the sender's display name. Null for generic senders like "Human Resources" and for people. */
 function senderName(from: string): string | null {
+  if (looksLikePerson(from)) return null;
   const name = cleanCompany(splitSender(from).name);
   return name.length >= 2 ? name : null;
 }
