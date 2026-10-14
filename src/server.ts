@@ -63,8 +63,10 @@ export function buildServer(db: Db) {
     const rows = db.prepare("SELECT * FROM applications ORDER BY date_applied DESC, id DESC").all() as Application[];
     const countOf = (status: string) => rows.filter((r) => r.status === status).length;
     const review = (db.prepare("SELECT COUNT(*) AS n FROM review_queue WHERE resolved = 0").get() as { n: number }).n;
-    // Fixed order; "offer" only appears once there is one.
-    const filters = (["applied", "interviewing", "rejected", "offer"] as const).filter((s) => s !== "offer" || countOf(s) > 0);
+    // Fixed order; "offer" and "withdrawn" only appear once there is one.
+    const filters = (["applied", "interviewing", "rejected", "offer", "withdrawn"] as const).filter(
+      (s) => (s !== "offer" && s !== "withdrawn") || countOf(s) > 0,
+    );
 
     const html = page("RACHI", `
 <h1>RACHI</h1>

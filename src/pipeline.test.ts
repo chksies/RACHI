@@ -49,7 +49,7 @@ describe("parsers", () => {
     expect(parseEmail(mail({ from: "no-reply@us.greenhouse-mail.io", subject: "An update on your application to Canonical - Cloud Field Engineer" }))).toMatchObject({ company: "Canonical", role: "Cloud Field Engineer" });
   });
   it("returns null when nothing names a company", () => {
-    expect(parseEmail(mail({ subject: "Hello there" }))).toBeNull();
+    expect(parseEmail(mail({ from: "no-reply@us.greenhouse-mail.io", subject: "Hello there" }))).toBeNull();
   });
 });
 
@@ -94,7 +94,7 @@ describe("dedup + pipeline", () => {
 
   it("queues unparseable job mail instead of dropping it", () => {
     const db = openDb(":memory:");
-    const m = mail({ from: "hr@unknown.com", subject: "Interview with Foo Corp", body: "Please share your availability for an interview" });
+    const m = mail({ from: "notify@dayforce.com", subject: "Interview scheduling", body: "Please share your availability to schedule an interview" });
     expect(processEmail(db, m)).toBe("queued");
     expect(db.prepare("SELECT COUNT(*) AS n FROM review_queue").get()).toEqual({ n: 1 });
   });
@@ -159,11 +159,11 @@ describe("resolveReview without a typed company", () => {
     expect(db.prepare("SELECT status FROM applications").all()).toEqual([{ status: "rejected" }]);
   });
 
-  it("falls back to the sender's domain", () => {
+  it("files a mail the parser can't name under the company the user types", () => {
     const db = openDb(":memory:");
-    const id = queueMail(db, "careers@talent.autodesk.com", "Chukwuemeka, we have received your application");
-    resolveReview(db, id, { status: "applied" });
-    expect(company(db)).toBe("Autodesk");
+    const id = queueMail(db, "notify@dayforce.com", "Interview scheduling");
+    resolveReview(db, id, { company: "Scotiabank", status: "applied" });
+    expect(company(db)).toBe("Scotiabank");
   });
 
   it("never invents an employer from an ATS domain", () => {

@@ -1,6 +1,6 @@
 export type EmailKind = "confirmation" | "rejection" | "interview" | "status" | "noise";
 
-export type ApplicationStatus = "applied" | "interviewing" | "rejected" | "offer";
+export type ApplicationStatus = "applied" | "interviewing" | "rejected" | "offer" | "withdrawn";
 
 export interface RawEmail {
   id: string;

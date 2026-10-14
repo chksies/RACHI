@@ -10,11 +10,21 @@ Every 15 minutes the poller runs this loop:
 
 1. **Fetch.** `users.messages.list` with `newer_than:Nd`, then `users.messages.get` for each message.
 2. **Classify.** Rule-based scoring: confirmation, rejection, interview, status, or noise. Mail from known ATS domains is job-related by definition.
-3. **Parse.** One small parser per ATS (Ashby, Greenhouse, Lever, iCIMS, Workday) returns `{company, role, location, source}` or `null`.
+3. **Parse.** Subject templates (Ashby, Greenhouse, Lever, iCIMS, Workday, HiBob, LinkedIn, Wellfound), then the sender's name, then body templates, then the sender's own domain. It returns `{company, role, location, source}` or `null`.
 4. **Dedup.** Company names are normalized (`Greenhouse Software, Inc.` and `greenhouse` match). A match updates the existing row; no match on a confirmation creates one.
 5. **Review queue.** Job-related mail that no parser understood is stored, never dropped.
 
 Every Gmail message ID is recorded in `processed_messages`, so re-polling is idempotent. `applications.gmail_message_id` is `UNIQUE` as a second layer against duplicates.
+
+## Rules, not AI
+
+Everything RACHI decides is an explicit rule you can read and change in [`src/templates.ts`](src/templates.ts): subject and body templates per ATS, rejection / confirmation / interview phrases, spam signals and terminal states. No model is involved.
+
+- **Two passes.** Pass 1 (the poll) is the only thing that creates applications, from confirmation templates. Pass 2 (the status sweep, every 6 hours, `SWEEP_INTERVAL_HOURS`) searches Gmail for each company that is not in a terminal state (rejected, offer, withdrawn) and moves it forward when newer mail from or about that company says so. It never creates a row.
+- **no-reply is a boost, not a filter.** Plenty of real rejections come from a person's address.
+- **Spam lowers confidence, it does not delete.** "Unsubscribe" appears in real ATS mail (IBM, Dayforce, Wellfound), so it only subtracts from the score; a known template always wins.
+- **Strong rejection phrases are decisive.** A rejection that opens with "thank you for applying" is still a rejection; a lone "unfortunately" is not.
+- **The review queue is the safety net.** Anything job-like that no template names goes to `/review`, never silently dropped.
 
 ## Auth and privacy
 

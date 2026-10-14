@@ -2,6 +2,7 @@ import type { createOAuthClient } from "./gmail/auth.js";
 import type { Db } from "./db.js";
 import { fetchEmail, listJobMessageIds } from "./gmail/fetch.js";
 import { processEmail, type Outcome } from "./pipeline.js";
+import { sweepOpenApplications, type SweepSummary } from "./sweep.js";
 
 type OAuth2Client = ReturnType<typeof createOAuthClient>;
 
@@ -34,6 +35,15 @@ export async function pollOnce(db: Db, auth: OAuth2Client): Promise<PollSummary>
   return summary;
 }
 
+/** Pass 2 is heavier (one Gmail search per open company), so it runs every few hours, not every poll. */
+export async function sweepIfDue(db: Db, auth: OAuth2Client, everyHours: number): Promise<SweepSummary | null> {
+  const last = db.prepare("SELECT value FROM sync_state WHERE key = 'last_sweep'").get() as { value: string } | undefined;
+  if (last && Date.now() - Date.parse(last.value) < everyHours * 3_600_000) return null;
+  const summary = await sweepOpenApplications(db, auth);
+  db.prepare("INSERT OR REPLACE INTO sync_state (key, value) VALUES ('last_sweep', ?)").run(new Date().toISOString());
+  return summary;
+}
+
 export function startPolling(db: Db, auth: OAuth2Client, intervalMinutes: number, log: (msg: string) => void) {
   let running = false;
   const tick = async () => {
@@ -41,6 +51,8 @@ export function startPolling(db: Db, auth: OAuth2Client, intervalMinutes: number
     running = true;
     try {
       log(`poll: ${JSON.stringify(await pollOnce(db, auth))}`);
+      const sweep = await sweepIfDue(db, auth, Number(process.env.SWEEP_INTERVAL_HOURS ?? 6));
+      if (sweep) log(`sweep: ${JSON.stringify(sweep)}`);
     } catch (err) {
       log(`poll failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {

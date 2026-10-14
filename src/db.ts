@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS review_queue (
   resolved INTEGER NOT NULL DEFAULT 0
 );
 
+-- Mail the status sweep looked at and found nothing actionable in, so it is not fetched again.
+CREATE TABLE IF NOT EXISTS status_checked (
+  gmail_message_id TEXT PRIMARY KEY,
+  checked_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS sync_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL

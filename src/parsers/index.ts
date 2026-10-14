@@ -1,3 +1,4 @@
+import { BODY_TEMPLATES, NON_EMPLOYER_DOMAINS, SUBJECT_TEMPLATES, type Match, type Template } from "../templates.js";
 import type { EmailKind, ParsedApplication, RawEmail } from "../types.js";
 
 export type Parser = (email: RawEmail) => ParsedApplication | null;
@@ -29,15 +30,32 @@ export function cleanCompany(raw: string): string {
     .trim();
 }
 
-/** Company from the sender when the subject doesn't name one. Null for generic senders. */
-export function senderCompany(from: string): string | null {
+/** Company from the sender's display name. Null for generic senders like "Human Resources". */
+function senderName(from: string): string | null {
+  const name = cleanCompany(splitSender(from).name);
+  return name.length >= 2 ? name : null;
+}
+
+/** Workday mails come from {company}@myworkday.com. */
+function workdayLocalPart(from: string): string | null {
   const s = splitSender(from);
-  const fromName = cleanCompany(s.name);
-  if (fromName.length >= 2) return fromName;
   if (s.domain.endsWith("myworkday.com") && /^[a-z0-9-]{2,}$/i.test(s.local) && !/workday|reply/i.test(s.local)) {
     return s.local[0]!.toUpperCase() + s.local.slice(1);
   }
   return null;
+}
+
+/** Company from the sender's own domain: careers@talent.autodesk.com -> "Autodesk". Null for ATS and mail hosts. */
+export function domainCompany(from: string): string | null {
+  const labels = splitSender(from).domain.split(".");
+  const label = labels.length >= 2 ? labels[labels.length - 2]! : "";
+  if (!label || NON_EMPLOYER_DOMAINS.test(label)) return null;
+  return label[0]!.toUpperCase() + label.slice(1);
+}
+
+/** Company from the sender when the subject doesn't name one. Null for generic senders. */
+export function senderCompany(from: string): string | null {
+  return senderName(from) ?? workdayLocalPart(from);
 }
 
 export function sourceOf(from: string): string {
@@ -47,6 +65,8 @@ export function sourceOf(from: string): string {
   if (d.includes("myworkday.com")) return "workday";
   if (d.includes("greenhouse")) return "greenhouse";
   if (d.includes("icims.com")) return "icims";
+  if (d.includes("hibob.com")) return "hibob";
+  if (d.includes("bamboohr.com")) return "bamboohr";
   return "email";
 }
 
@@ -58,71 +78,38 @@ function cleanRole(role: string | null, company: string): string | null {
   return trimmed || null;
 }
 
-interface Match {
-  company?: string;
-  role?: string;
-  location?: string;
+function firstMatch(templates: Template[], text: string): Match {
+  for (const t of templates) {
+    const m = text.match(t.re);
+    if (m) return t.pick(m);
+  }
+  return {};
 }
 
-/** Subject patterns, most specific first. The first one that matches wins. */
-const SUBJECT_PATTERNS: { re: RegExp; pick: (m: RegExpMatchArray) => Match }[] = [
-  // Ashby: "Application Received — Software Engineer, Dev Velocity at Render"
-  { re: /^application received\s*[—–-]\s*(.+?)\s+at\s+(.+?)\s*$/i, pick: (m) => ({ role: m[1], company: m[2] }) },
-  // Workday: "Application Received for Software Developer Intern at Perseus Group"
-  { re: /^application received for\s+(.+?)\s+at\s+(.+?)\s*$/i, pick: (m) => ({ role: m[1], company: m[2] }) },
-  // Greenhouse: "Thank you for applying to the Software Engineer role at Greenhouse!"
-  { re: /thank you for applying to the\s+(.+?)\s+role at\s+(.+?)\s*!?\s*$/i, pick: (m) => ({ role: m[1], company: m[2] }) },
-  // Greenhouse: "Your application for Software Engineering Intern 2027 (Toronto) at Pinterest"
-  { re: /^your application for\s+(.+)\s+at\s+(.+?)\s*$/i, pick: (m) => ({ role: m[1], company: m[2] }) },
-  // Greenhouse: "An update on your application to Canonical - Cloud Field Engineer"
-  { re: /^an update on your application to\s*(.+?)\s+[-–—]\s+(.+)$/i, pick: (m) => ({ company: m[1], role: m[2] }) },
-  // "Quora | Application | Role - Quora (Remote)", "Marvell | Application Confirmation | Role"
-  {
-    re: /^([^|]+?)\s*\|\s*(?:application(?: confirmation)?|thank you for applying!?)\s*\|\s*(.+)$/i,
-    pick: (m) => ({ company: m[1], role: m[2] }),
-  },
-  // iCIMS: "Thank you for applying at CA-PE-Charlottetown" (a location code, not a company)
-  { re: /thank you for applying at\s+(.+?)\s*$/i, pick: (m) => ({ location: m[1] }) },
-  // Lever: "Thanks for your interest in Betstamp, Chukwuemeka"
-  { re: /thanks for your interest in\s+(.+?)\s*(?:,|!|$)/i, pick: (m) => ({ company: m[1] }) },
-  // Lever: "Thank you for your application to Mechanical Orchard"
-  { re: /thank you for your application to\s+(.+?)\s*$/i, pick: (m) => ({ company: m[1] }) },
-  // "Thank you for applying for IT Operations Analyst (12414)": the tail is a role
-  { re: /thank you for applying for\s+(.+?)\s*$/i, pick: (m) => ({ role: m[1] }) },
-  // "Thanks for applying to Toast!", "Thank you for Applying to Amplitude", "...Application with Remarcable, Inc."
-  {
-    re: /(?:thank you|thanks) for (?:your )?(?:applying|application)\s+(?:to|with)\s+(.+?)\s*!?\s*$/i,
-    pick: (m) => ({ company: m[1] }),
-  },
-  // "Update on your application to Superhuman", "...toGenius AI"
-  { re: /update on your application to\s*(.+?)\s*$/i, pick: (m) => ({ company: m[1] }) },
-];
-
-// Subjects that name no company but are clearly application mail; the sender supplies it.
-const SENDER_ONLY_SUBJECT =
-  /thank you for (?:your )?(?:applying|application|interest)|application (?:received|confirmation)|we have received your application|update on your|your interest in/i;
-
-export function parseEmail(email: RawEmail, kind: EmailKind = "confirmation"): ParsedApplication | null {
+/**
+ * Where the company comes from, in order of trust:
+ * subject template -> sender display name -> body template -> workday sender -> sender domain.
+ * Returns null when none of them can name one; the email then goes to the review queue.
+ */
+export function parseEmail(email: RawEmail, _kind: EmailKind = "confirmation"): ParsedApplication | null {
   const source = sourceOf(email.from);
-  let match: Match = {};
-  for (const { re, pick } of SUBJECT_PATTERNS) {
-    const m = email.subject.match(re);
-    if (m) {
-      match = pick(m);
-      break;
+  const fromSubject = firstMatch(SUBJECT_TEMPLATES, email.subject);
+
+  let company = fromSubject.company ? cleanCompany(fromSubject.company) : "";
+  let role = fromSubject.role ?? null;
+  const location = fromSubject.location ?? null;
+
+  if (!company) company = senderName(email.from) ?? "";
+  if (!company) {
+    const fromBody = firstMatch(BODY_TEMPLATES, email.body.replace(/\s+/g, " "));
+    if (fromBody.company) {
+      company = cleanCompany(fromBody.company);
+      role ??= fromBody.role ?? null;
     }
   }
-
-  let company = match.company ? cleanCompany(match.company) : "";
-  if (!company && (kind === "confirmation" || SENDER_ONLY_SUBJECT.test(email.subject) || source !== "email")) {
-    company = senderCompany(email.from) ?? "";
-  }
+  if (!company) company = workdayLocalPart(email.from) ?? "";
+  if (!company) company = domainCompany(email.from) ?? "";
   if (!company) return null;
 
-  return {
-    company,
-    role: cleanRole(match.role?.trim() ?? null, company),
-    location: match.location ?? null,
-    source,
-  };
+  return { company, role: cleanRole(role?.trim() ?? null, company), location, source };
 }

@@ -59,16 +59,20 @@ export function jobQuery(newerThanDays: number): string {
 
 /** users.messages.list: IDs only, which is cheap. Full messages are fetched one at a time later. */
 export async function listJobMessageIds(auth: OAuth2Client, newerThanDays: number): Promise<string[]> {
+  return searchMessageIds(auth, jobQuery(newerThanDays));
+}
+
+/** Any Gmail search query, paged. Used by the job-mail poll and by the per-company status sweep. */
+export async function searchMessageIds(auth: OAuth2Client, q: string, maxPages = 5): Promise<string[]> {
   const gmail = google.gmail({ version: "v1", auth });
   const ids: string[] = [];
   let pageToken: string | undefined;
+  let pages = 0;
   do {
-    const res = await withBackoff(() =>
-      gmail.users.messages.list({ userId: "me", q: jobQuery(newerThanDays), maxResults: 100, pageToken }),
-    );
+    const res = await withBackoff(() => gmail.users.messages.list({ userId: "me", q, maxResults: 100, pageToken }));
     res.data.messages?.forEach((m) => m.id && ids.push(m.id));
     pageToken = res.data.nextPageToken ?? undefined;
-  } while (pageToken);
+  } while (pageToken && ++pages < maxPages);
   return ids;
 }
 

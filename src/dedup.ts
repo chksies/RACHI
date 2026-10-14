@@ -40,11 +40,14 @@ export function findByText(db: Db, text: string): Application | null {
   return rows.find((r) => r.company_key && haystack.includes(` ${r.company_key} `)) ?? null;
 }
 
-const RANK: Record<ApplicationStatus, number> = { applied: 0, interviewing: 1, offer: 2, rejected: 3 };
+const RANK: Record<ApplicationStatus, number> = { applied: 0, interviewing: 1, offer: 2, rejected: 3, withdrawn: 3 };
 
-/** A late confirmation must not overwrite a rejection; otherwise the newer signal wins. */
+/**
+ * A late confirmation must not overwrite a rejection or withdrawal; an offer is never
+ * downgraded by a rejection; otherwise the newer, further-along signal wins.
+ */
 export function nextStatus(current: ApplicationStatus, incoming: ApplicationStatus): ApplicationStatus {
-  if (incoming === "rejected") return current === "offer" ? current : "rejected";
-  if (current === "rejected") return incoming === "offer" ? "offer" : current;
+  if (incoming === "rejected" || incoming === "withdrawn") return current === "offer" ? current : incoming;
+  if (current === "rejected" || current === "withdrawn") return incoming === "offer" ? "offer" : current;
   return RANK[incoming] > RANK[current] ? incoming : current;
 }
